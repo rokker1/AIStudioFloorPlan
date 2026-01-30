@@ -9,7 +9,6 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "@google/genai": "^1.14.0",
     "@types/jszip": "^3.4.0",
     "clsx": "^2.1.1",
     "framer-motion": "^12.23.12",
