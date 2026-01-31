@@ -1,0 +1,556 @@
+@startuml Step2_AI_Rendering_Sequence
+
+!theme plain
+skinparam backgroundColor #FEFEFE
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam maxMessageSize 300
+skinparam sequenceArrowThickness 2
+skinparam roundcorner 10
+skinparam sequenceParticipant underline
+
+title **Шаг 2: AI-рендеринг плана помещения**\n//Подробная последовательность вызовов моделей//
+
+' ========== УЧАСТНИКИ ==========
+
+actor "Пользователь" as User #LightBlue
+participant "Step2Rendering\n(React компонент)" as Step2 #LightGreen
+participant "DrawingCanvas\n(компонент маски)" as Canvas #LightYellow
+participant "geminiService\n(сервисный слой)" as Service #LightCoral
+participant "Image API\n:8001" as ImageAPI #Plum
+participant "Text API\n:8000\n(Vision)" as TextAPI #Gold
+
+' ========== ИНИЦИАЛИЗАЦИЯ ==========
+
+box "Браузер (React)" #AliceBlue
+    participant Step2
+    participant Canvas
+    participant Service
+end box
+
+box "Локальные AI-серверы" #MistyRose
+    participant ImageAPI
+    participant TextAPI
+end box
+
+== СЦЕНАРИЙ 1: Начальная генерация рендера ==
+
+User -> Step2 : Выбор количества\nизображений (1-4)
+activate Step2
+Step2 -> Step2 : setNumberOfImages(n)
+
+User -> Step2 : Нажатие\n"Начать AI рендеринг"
+Step2 -> Step2 : handleInitialGeneration()
+Step2 -> Step2 : setIsGenerating(true)
+Step2 -> Step2 : setShowConfirmation(false)
+Step2 -> Step2 : setGeneratedOptions([])
+
+Step2 -> Service : generateAIRendering(\n  originalImage,\n  undefined,\n  undefined,\n  numberOfImages\n)
+activate Service
+
+Service -> Service : imageSrcToInlineData(originalImage)
+note right of Service
+  Конвертация DataURL в InlineData:
+  {
+    mimeType: "image/png",
+    data: "base64..."
+  }
+end note
+
+loop для каждого изображения (1..numberOfImages)
+    Service -> Service : Формирование промпта
+    note right of Service #FFFACD
+      **Дефолтный промпт рендеринга:**
+      ────────────────────────────
+      Transform this 2D architectural floor plan
+      into a precise, high-quality 3D rendered
+      top-down view with the following requirements:
+      
+      **CLEANING REQUIREMENTS:**
+      - COMPLETELY REMOVE all text, Chinese characters,
+        numbers, dimension markings, labels...
+      
+      **SYMBOL INTERPRETATION:**
+      - Rectangle with vertical lines → wardrobe (衣櫃)
+      - Rectangle with large 'X' → storage cabinet (收納櫃)
+      
+      **ARCHITECTURAL PRECISION:**
+      - Maintain exact wall positions, thicknesses...
+      
+      **VISUAL ENHANCEMENT:**
+      - Add realistic architectural materials...
+    end note
+    
+    Service -> Service : generatePromptVariations(prompt)
+    note right of Service
+      Добавление уникальности:
+      + случайный суффикс
+      + timestamp [1706745600000]
+    end note
+    
+    Service -> Service : generateArchitecturalImage(\n  prompt,\n  baseImage\n)
+    activate Service #LightPink
+    
+    Service -> Service : callLocalImageModel(\n  prompt,\n  baseImage,\n  undefined,\n  undefined\n)
+    
+    Service -> Service : Подготовка FormData
+    note right of Service
+      FormData:
+      ─────────
+      prompt: "Transform this 2D..."
+      model: "qwen-image-edit"
+      n: 1
+      response_format: "b64_json"
+      image: Blob (base-image.png)
+    end note
+    
+    Service -> ImageAPI : **POST /v1/images/edits**\n[multipart/form-data]
+    activate ImageAPI #Plum
+    
+    ImageAPI -> ImageAPI : Обработка изображения\nAI-моделью
+    note over ImageAPI #FFEFD5
+      **Процесс в Image Model:**
+      1. Декодирование base64
+      2. Анализ плана
+      3. Удаление текста/аннотаций
+      4. Генерация 3D-визуализации
+      5. Применение материалов
+      6. Кодирование результата
+    end note
+    
+    alt Успешная генерация
+        ImageAPI --> Service : HTTP 200\n{\n  "data": [{\n    "b64_json": "iVBORw0K..."\n  }]\n}
+        deactivate ImageAPI
+        
+        Service -> Service : Формирование DataURL
+        note right of Service
+          "data:image/png;base64," +
+          payload.data[0].b64_json
+        end note
+        
+    else Ошибка генерации
+        ImageAPI --> Service : HTTP 4xx/5xx\n{\n  "error": {\n    "message": "..."\n  }\n}
+        
+        Service -> Service : attempts++
+        
+        alt attempts < 5
+            Service -> Service : Экспоненциальная задержка
+            note right of Service
+              backoffTime = min(2^attempts × 500, 8000)
+              Попытка 1: 1000ms
+              Попытка 2: 2000ms
+              Попытка 3: 4000ms
+              Попытка 4: 8000ms
+            end note
+            Service -> Service : await sleep(backoffTime)
+            Service -> ImageAPI : Повторный запрос
+        else attempts >= 5
+            Service --> Step2 : throw Error(\n  "Local image generation failed\n  after 5 attempts"\n)
+        end
+    end
+    
+    deactivate Service
+end
+
+Service --> Step2 : string[] (массив DataURL)
+deactivate Service
+
+alt numberOfImages === 1
+    Step2 -> Step2 : setRenderedImage(results[0])
+    Step2 -> Step2 : setShowConfirmation(true)
+    Step2 --> User : Отображение результата\nс кнопками\n"Принять" / "Перегенерировать"
+else numberOfImages > 1
+    Step2 -> Step2 : setGeneratedOptions(results)
+    Step2 -> Step2 : setIsSelecting(true)
+    Step2 --> User : Отображение сетки\nдля выбора варианта
+end
+
+deactivate Step2
+
+== СЦЕНАРИЙ 2: Выбор варианта из нескольких ==
+
+User -> Step2 : Клик на изображении\nв сетке
+activate Step2
+Step2 -> Step2 : previewSelection(url)
+Step2 -> Step2 : setSelectedCandidate(url)
+Step2 --> User : Увеличенный превью\nс подтверждением
+
+User -> Step2 : Нажатие\n"Да, я хочу это изображение"
+Step2 -> Step2 : confirmSelection()
+Step2 -> Step2 : Добавление предыдущего\nв imageHistory
+Step2 -> Step2 : setRenderedImage(selectedCandidate)
+Step2 -> Step2 : setIsSelecting(false)
+Step2 -> Step2 : setShowEditingControls(true)
+Step2 -> Step2 : onRenderingComplete(selectedCandidate)
+Step2 --> User : Переход в режим\nредактирования
+deactivate Step2
+
+== СЦЕНАРИЙ 3: Коррекция с маской ==
+
+User -> Canvas : Рисование на изображении\n(выделение области)
+activate Canvas
+Canvas -> Canvas : onPointerDown → startDrawing()
+Canvas -> Canvas : onPointerMove → draw()
+note right of Canvas
+  ctx.strokeStyle = 'rgba(220, 38, 38, 0.7)'
+  ctx.lineWidth = 30 × (width / 1000)
+  ctx.lineCap = 'round'
+end note
+Canvas -> Canvas : onPointerUp → stopDrawing()
+Canvas --> User : Визуальная маска\n(красные штрихи)
+deactivate Canvas
+
+User -> Step2 : Ввод описания коррекции
+activate Step2
+Step2 -> Step2 : setCorrectionInput(text)
+note right of Step2 #FFFACD
+  Пример ввода:
+  "добавить окно здесь"
+  "удалить эту стену"
+  "заменить дверь на арку"
+end note
+
+User -> Step2 : Нажатие\n"Отправить коррекцию"
+Step2 -> Step2 : submitCorrection()
+
+Step2 -> Canvas : getMaskBase64()
+activate Canvas
+Canvas -> Canvas : Проверка наличия рисунка
+Canvas -> Canvas : Создание maskCanvas
+Canvas -> Canvas : Копирование рисунка
+Canvas -> Canvas : globalCompositeOperation\n= 'source-in'
+Canvas -> Canvas : Заливка белым цветом
+note right of Canvas
+  Красные штрихи → белый
+end note
+Canvas -> Canvas : globalCompositeOperation\n= 'destination-over'
+Canvas -> Canvas : Заливка черным фоном
+note right of Canvas
+  Фон → черный
+  Результат: черно-белая маска
+end note
+Canvas -> Canvas : toDataURL().split(',')[1]
+Canvas --> Step2 : maskBase64: string
+deactivate Canvas
+
+Step2 -> Step2 : setIsGenerating(true)
+
+Step2 -> Service : generateAIRendering(\n  renderedImage,\n  correctionInput,\n  maskBase64,\n  numberOfImages\n)
+activate Service
+
+Service -> Service : imageSrcToInlineData(baseImage)
+
+loop для каждого изображения
+    Service -> Service : Формирование промпта\nдля коррекции с маской
+    note right of Service #FFFACD
+      **Промпт коррекции с маской:**
+      ────────────────────────────
+      Using the provided black and white mask image,
+      make precise modifications to the base image,
+      which is an architectural top-down view.
+      
+      Apply the following changes: "${correctionInput}"
+      
+      **PERSPECTIVE INSTRUCTIONS:**
+      - The base image is a TOP-DOWN ARCHITECTURAL VIEW
+      - Objects MUST be rendered from TOP-DOWN perspective
+      - DO NOT generate side-view or isometric-view objects
+      
+      **MASKING INSTRUCTIONS:**
+      - You MUST only modify WHITE regions in the mask
+      - BLACK areas MUST be preserved exactly as they are
+      - Ensure seamless blending between edited/unedited parts
+      - Do not include the mask in the final output
+      
+      **QUALITY REQUIREMENTS:**
+      - Maintain original lighting, style, perspective
+      - Ensure photorealistic, high-quality edits
+    end note
+    
+    Service -> Service : generatePromptVariations(prompt)
+    
+    Service -> Service : generateArchitecturalImage(\n  prompt,\n  baseImage,\n  maskImage\n)
+    
+    Service -> Service : Подготовка FormData
+    note right of Service
+      FormData:
+      ─────────
+      prompt: "Using the provided..."
+      model: "qwen-image-edit"
+      n: 1
+      response_format: "b64_json"
+      image: Blob (текущий рендер)
+      mask: Blob (черно-белая маска)
+    end note
+    
+    Service -> ImageAPI : **POST /v1/images/edits**\n[multipart/form-data\n+ mask]
+    activate ImageAPI
+    
+    ImageAPI -> ImageAPI : Inpainting/редактирование\nпо маске
+    note over ImageAPI #FFEFD5
+      **Процесс Inpainting:**
+      1. Анализ маски (белые области)
+      2. Сохранение черных областей
+      3. Генерация контента для белых областей
+      4. Бесшовное смешивание
+    end note
+    
+    ImageAPI --> Service : HTTP 200\n{\n  "data": [{\n    "b64_json": "..."\n  }]\n}
+    deactivate ImageAPI
+    
+    Service -> Service : Формирование DataURL
+end
+
+Service --> Step2 : string[] (результаты)
+deactivate Service
+
+Step2 -> Step2 : Добавление в imageHistory
+Step2 -> Step2 : setRenderedImage(results[0])
+Step2 -> Step2 : setCorrectionInput('')
+Step2 -> Canvas : clearCanvas()
+Step2 -> Step2 : onRenderingComplete(result)
+Step2 --> User : Обновленное изображение
+deactivate Step2
+
+== СЦЕНАРИЙ 4: Автоматические материалы ==
+
+User -> Step2 : Нажатие\n"Применить автоматические материалы"
+activate Step2
+Step2 -> Step2 : applyAutoMaterial()
+Step2 -> Step2 : setIsGenerating(true)
+
+Step2 -> Service : generateAIRendering(\n  renderedImage,\n  autoMaterialPrompt,\n  undefined,\n  numberOfImages\n)
+activate Service
+
+note over Service #FFFACD
+  **Промпт автоматических материалов:**
+  ─────────────────────────────────────
+  Enhance this architectural rendering with
+  realistic materials and textures:
+  
+  **SYMBOL INTERPRETATION:**
+  - Rectangle with large 'X' → system cabinet (系統櫃)
+  
+  **FURNITURE & FIXTURES:**
+  - Apply varied and distinct colors and materials
+    for each individual piece of furniture
+  - If two sofas → render in different colors
+  
+  **FLOORING MATERIALS:**
+  - Hardwood for living areas
+  - Tiles for bathrooms/kitchens
+  - Carpet for bedrooms
+  
+  **WALL FINISHES:**
+  - Realistic wall textures
+  - Painted drywall, concrete, brick
+  - Neutral color palette
+  
+  **LIGHTING & SHADOWS:**
+  - Realistic natural lighting from windows
+  - Subtle shadows and depth
+  - Enhanced photorealism
+  
+  **MAINTAIN PRECISION:**
+  - Keep all architectural elements exactly
+  - Do not alter room layouts, wall positions
+  - Focus only on material enhancement
+end note
+
+Service -> Service : generateArchitecturalImage(...)
+
+Service -> ImageAPI : **POST /v1/images/edits**
+activate ImageAPI
+ImageAPI --> Service : Результат с улучшенными\nматериалами
+deactivate ImageAPI
+
+Service --> Step2 : string[]
+deactivate Service
+
+Step2 -> Step2 : Обновление истории и состояния
+Step2 --> User : Изображение с\nреалистичными материалами
+deactivate Step2
+
+== СЦЕНАРИЙ 5: Генерация Dollhouse-вида ==
+
+User -> Step2 : Нажатие\n"Создать Dollhouse вид"
+activate Step2
+Step2 -> Step2 : handleDollhouseGeneration()
+Step2 -> Step2 : setIsGenerating(true)
+
+Step2 -> Service : generateAIRendering(\n  renderedImage,\n  dollhousePrompt,\n  undefined,\n  numberOfImages\n)
+activate Service
+
+note over Service #FFFACD
+  **Промпт Dollhouse:**
+  ─────────────────────
+  Transform this top-down 3D floor plan into
+  a photorealistic, fully furnished, and decorated
+  **3D dollhouse view**.
+  
+  The final image MUST be rendered from a
+  **45-degree axonometric perspective**
+  (isometric view).
+  
+  **REQUIREMENTS:**
+  - Full Furnishing: beds, sofas, tables...
+  - Rich Decoration: rugs, plants, artwork...
+  - Detailed Textures: floors, walls, furniture
+  - Realistic Lighting: natural + soft shadows
+  - Architectural Integrity: maintain original layout
+  - Aesthetics: beautiful, high-quality visualization
+end note
+
+Service -> Service : generateArchitecturalImage(...)
+
+Service -> ImageAPI : **POST /v1/images/edits**
+activate ImageAPI
+
+ImageAPI -> ImageAPI : Преобразование\nперспективы\n+ добавление мебели
+note over ImageAPI #FFEFD5
+  **Процесс Dollhouse:**
+  1. Анализ структуры плана
+  2. Преобразование в изометрию
+  3. Добавление 3D-объемов стен
+  4. Генерация мебели для каждой комнаты
+  5. Применение декора и текстур
+  6. Рендеринг освещения и теней
+end note
+
+ImageAPI --> Service : Изометрический вид
+deactivate ImageAPI
+
+Service --> Step2 : string[]
+deactivate Service
+
+Step2 -> Step2 : Обновление состояния
+Step2 --> User : Dollhouse-визуализация
+deactivate Step2
+
+== СЦЕНАРИЙ 6: AI-предложение улучшений ==
+
+User -> Step2 : Нажатие\n"AI Совет"
+activate Step2
+Step2 -> Step2 : handleSuggestImprovement()
+Step2 -> Step2 : setIsSuggesting(true)
+
+Step2 -> Service : suggestPlanImprovements(\n  renderedImage\n)
+activate Service
+
+Service -> Service : imageSrcToInlineData(planImage)
+
+Service -> Service : callLocalChatCompletion(\n  prompt,\n  [planImage],\n  VISION_MODEL\n)
+
+note over Service #FFFACD
+  **Промпт для Vision модели:**
+  ─────────────────────────────
+  Analyze this rendered architectural floor plan.
+  
+  Provide **one concise, actionable suggestion**
+  for improvement that could be passed to an
+  AI image editor.
+  
+  The suggestion should be a **single sentence**.
+  
+  Examples:
+  - "Add a kitchen island for more counter space."
+  - "Convert the small bedroom into a home office."
+  - "Create an open-plan living area by removing
+    the wall between kitchen and living room."
+  
+  Focus on **architectural or significant
+  furniture layout changes**.
+  
+  Do not add conversational text, just the
+  suggestion itself.
+end note
+
+Service -> Service : Подготовка запроса
+note right of Service
+  {
+    model: "qwen2.5-vl",
+    messages: [{
+      role: "user",
+      content: [
+        { type: "text", text: "Analyze..." },
+        { type: "image_url",
+          image_url: {
+            url: "data:image/png;base64,..."
+          }
+        }
+      ]
+    }],
+    temperature: 0.4
+  }
+end note
+
+Service -> TextAPI : **POST /v1/chat/completions**\n[JSON + image_url]
+activate TextAPI #Gold
+
+TextAPI -> TextAPI : Анализ изображения\nVision моделью
+note over TextAPI #FFEFD5
+  **Процесс Vision анализа:**
+  1. Декодирование изображения
+  2. Распознавание комнат и объектов
+  3. Анализ планировки
+  4. Определение возможных улучшений
+  5. Формулировка краткого предложения
+end note
+
+TextAPI --> Service : HTTP 200\n{\n  "choices": [{\n    "message": {\n      "content": "Add a kitchen\n      island for more\n      counter space."\n    }\n  }]\n}
+deactivate TextAPI
+
+Service -> Service : Извлечение текста\nиз ответа
+Service -> Service : suggestion.trim()
+
+Service --> Step2 : "Add a kitchen island\nfor more counter space."
+deactivate Service
+
+Step2 -> Step2 : setCorrectionInput(suggestion)
+Step2 -> Step2 : setIsSuggesting(false)
+Step2 --> User : Поле ввода заполнено\nпредложением AI
+
+note over User #LightGreen
+  Пользователь может:
+  1. Отредактировать предложение
+  2. Нарисовать маску области
+  3. Нажать "Отправить коррекцию"
+end note
+
+deactivate Step2
+
+== СЦЕНАРИЙ 7: Восстановление предыдущей версии ==
+
+User -> Step2 : Нажатие "Восстановить"
+activate Step2
+Step2 -> Step2 : restorePrevious()
+
+Step2 -> Step2 : Проверка imageHistory.length > 0
+
+alt История не пуста
+    Step2 -> Step2 : previous = imageHistory[length - 1]
+    Step2 -> Step2 : setRenderedImage(previous.url)
+    Step2 -> Step2 : setImageHistory(prev => prev.slice(0, -1))
+    Step2 -> Step2 : onRenderingComplete(previous.url)
+    Step2 --> User : Предыдущая версия\nизображения
+else История пуста
+    Step2 --> User : Кнопка неактивна\n(disabled)
+end
+
+deactivate Step2
+
+== СЦЕНАРИЙ 8: Скачивание результата ==
+
+User -> Step2 : Нажатие "Скачать"
+activate Step2
+Step2 -> Step2 : downloadImage()
+
+Step2 -> Step2 : Создание <a> элемента
+Step2 -> Step2 : link.href = renderedImage
+Step2 -> Step2 : link.download =\n"ai-generated-plan.png"
+Step2 -> Step2 : link.click()
+
+Step2 --> User : Файл\nai-generated-plan.png
+deactivate Step2
+
+@enduml
