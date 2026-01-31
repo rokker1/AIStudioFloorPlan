@@ -92,7 +92,7 @@ docker volume rm comfyui_data
 
 **Дата:** 2026-01-31
 
-1. Обновлён драйвер NVIDIA: 525.60.11 → 570.133.07
+1. Обновлён драйвер NVIDIA: 525.60.11 → 570.133.07 (см. [NVIDIA_DRIVER_UPDATE.md](NVIDIA_DRIVER_UPDATE.md))
 2. Собран Docker образ с Python 3.13 и comfy-cli
 3. Запущен контейнер с GPU passthrough
 4. Установлен ComfyUI через comfy-cli
